@@ -18,7 +18,7 @@ import netbots_math as nbmath
 
 robotName = "Cyrus_Bot"
 
-def setNewDirection(direction, wall):
+def reverseDirection(direction, wall):
     getLocationReply = botSocket.sendRecvMessage({'type': 'getLocationRequest'})
     x = getLocationReply['x']
     y = getLocationReply['y']
@@ -35,6 +35,20 @@ def setNewDirection(direction, wall):
             direction = math.pi
 
     return direction
+
+def findSpeed(direction, startingDirection):
+    getLocationReply = botSocket.sendRecvMessage({'type': 'getLocationRequest'})
+    x = getLocationReply['x']
+    y = getLocationReply['y']
+
+    # if we are gonna hit a wall, slow down to 10% speed, else go full speed to avoid bullets
+    if (x <= 100 and direction == math.pi) or (x >= 900 and direction == 0) or (y <= 100 and direction == math.pi * 3/2) or (y >= 900 and direction == math.pi/2):
+        if startingDirection:
+            return 10
+        else:
+            return 0
+    else:
+        return 50
 
 def play(botSocket, srvConf):
     gameNumber = 0  # The last game number bot got from the server (0 == no game has been started)
@@ -58,8 +72,13 @@ def play(botSocket, srvConf):
             gameNumber = getInfoReply['gameNumber']
             log("Game " + str(gameNumber) + " has started. Points so far = " + str(getInfoReply['points']))
 
+            maxSpeed = 70
+            reversing = False
+            scanCounter = 0
+            defensiveScan = False
             counter = 0
             direction = 0
+            speed = 50
             startingDirection = True
             wall = ""
             currentMode = "scan"
@@ -73,7 +92,7 @@ def play(botSocket, srvConf):
             x = getLocationReply['x']
             y = getLocationReply['y']
 
-            ## run to nearest wall from starting location
+            # run to nearest wall from starting location
             if x < 500 and y < 500:
                 if x >= y:
                     direction = math.pi * 3/2
@@ -89,39 +108,57 @@ def play(botSocket, srvConf):
                     direction = math.pi
                     wall = "left"
             elif x >= 500 and y < 500:
-                if 1000-x >= y:
+                if 1000-x <= y:
                     direction = 0
                     wall = "right"
                 else:
                     direction = math.pi * 3/2
                     wall = "down"
             elif x >= 500 and y >= 500:
-                if 1000-x >= 1000-y:
+                if x >= y:
                     direction = 0
-                    wall = "left"
+                    wall = "right"
                 else:
                     direction  = math.pi/2
                     wall = "up"
 
         try:
 
+            getLocationReply = botSocket.sendRecvMessage({'type': 'getLocationRequest'})
+            x = getLocationReply['x']
+            y = getLocationReply['y']
             getSpeedReply = botSocket.sendRecvMessage({'type': 'getSpeedRequest'})
 
-            if getSpeedReply['requestedSpeed'] == 0:
+            if getSpeedReply['currentSpeed'] == 0:
 
                 if not(startingDirection):
-                    direction = setNewDirection(direction, wall)
+                    direction = reverseDirection(direction, wall)
                 if counter >= 1:
                     startingDirection = False
 
                 # Turn in a new direction
                 botSocket.sendRecvMessage({'type': 'setDirectionRequest', 'requestedDirection': direction})
 
-                # Request we start accelerating to half speed
-                botSocket.sendRecvMessage({'type': 'setSpeedRequest', 'requestedSpeed': 50})
+                speed = maxSpeed
 
                 # log some useful information.
-                log("Requested to go " + str(direction/math.pi) + " pi radians at max speed.", "INFO")
+                log("Requested to go " + str(direction/math.pi) + " pi radians at speed: " + str(speed), "INFO")
+                botSocket.sendRecvMessage({'type': 'setSpeedRequest', 'requestedSpeed': speed})
+                reversing = False
+
+            elif not(reversing):
+
+                if startingDirection:
+                    if (x <= 100 and direction == math.pi) or (x >= 900 and direction == 0) or (y <= 100 and direction == math.pi * 3/2) or (y >= 900 and direction == math.pi/2):
+                        speed = 10
+                else:
+                    if (x <= 200 and direction == math.pi) or (x >= 800 and direction == 0) or (y <= 200 and direction == math.pi * 3/2) or (y >= 800 and direction == math.pi/2):
+                        speed = 0
+                        reversing = True
+                    else:
+                        speed = maxSpeed
+
+                botSocket.sendRecvMessage({'type': 'setSpeedRequest', 'requestedSpeed': speed})
 
             if not(startingDirection):
                 if currentMode == "wait":
@@ -133,33 +170,63 @@ def play(botSocket, srvConf):
                         currentMode = "scan"
 
                 if currentMode == "scan":
-                    log("scanning at scan slice " + str(nextScanSlice), "INFO")
-                    scanRadStart = nextScanSlice * scanSliceWidth
-                    scanRadEnd = min(scanRadStart + scanSliceWidth, math.pi * 2)
+
+                    defensiveScan = True if scanCounter % 5 == 0 else False
+
+                    # defensive scan
+                    if defensiveScan:
+                        scanSliceTemp = nextScanSlice
+
+                        scanRadStart = direction - math.pi/4
+                        scanRadEnd = direction + math.pi/4
+
+                        if scanRadStart < 0:
+                            scanRadStart += math.pi*2
+                        if scanRadEnd >= math.pi*2:
+                            scanRadEnd -= math.pi*2
+
+                    else:
+
+                        scanSliceWidth = math.pi * 2 / scanSlices
+                        scanRadStart = nextScanSlice * scanSliceWidth
+                        scanRadEnd = min(scanRadStart + scanSliceWidth, math.pi * 2)
+
                     scanReply = botSocket.sendRecvMessage(
                         {'type': 'scanRequest', 'startRadians': scanRadStart, 'endRadians': scanRadEnd})
 
+                    if defensiveScan:
+                        nextScanSlice = scanSliceTemp - 1
+
                     # if we found an enemy robot with our scan
                     if scanReply['distance'] != 0:
-                        # fire down the center of the slice we just scanned.
-                        fireDirection = scanRadStart + scanSliceWidth / 2
-                        botSocket.sendRecvMessage(
-                            {'type': 'fireCanonRequest', 'direction': fireDirection, 'distance': scanReply['distance']})
-                        # make sure don't try and shoot again until this shell has exploded.
-                        currentMode = "wait"
+                        if scanReply['distance'] >= 100:
+                            # fire down the center of the slice we just scanned.
+                            fireDirection = scanRadStart + scanSliceWidth / 2
+                            botSocket.sendRecvMessage(
+                                {'type': 'fireCanonRequest', 'direction': fireDirection, 'distance': scanReply['distance']})
+                            # make sure don't try and shoot again until this shell has exploded.
+                            currentMode = "wait"
+                        if defensiveScan and scanReply['distance'] <= 200:
+                            # if the scan shows that a bot is right in front of us, we want to reverse direction as to not get hit
+                            log("there is a bot that scares us", "INFO")
+                            reversing = True
+                            speed = 0
+                            botSocket.sendRecvMessage({'type': 'setSpeedRequest', 'requestedSpeed': speed})
 
-                    nextScanSlice += 1
+                    else:
+                        nextScanSlice += 1
                     if nextScanSlice == maxScanSlice:
                         nextScanSlice = minScanSlice
                     elif nextScanSlice == scanSlices:
                         nextScanSlice = 0
+                    scanCounter += 1
 
             # initialize starting scan slice
             else:
                 if wall == "up":
                     nextScanSlice = 16
                     minScanSlice = 16
-                    maxScanSlice = 0
+                    maxScanSlice = 32
                 elif wall == "left":
                     nextScanSlice = 24
                     minScanSlice = 24
