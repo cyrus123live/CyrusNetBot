@@ -19,9 +19,6 @@ import netbots_math as nbmath
 robotName = "Cyrus_Bot"
 
 def reverseDirection(direction, wall):
-    getLocationReply = botSocket.sendRecvMessage({'type': 'getLocationRequest'})
-    x = getLocationReply['x']
-    y = getLocationReply['y']
 
     if wall == "left" or wall == "right":
         if direction == math.pi/2:
